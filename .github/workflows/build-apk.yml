@@ -1,62 +1,110 @@
-name: Build TeinBooster APK
+
+name: TeinBooster - Build and Release APK
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'TeinBooster.zip'
-      - '.github/workflows/build-apk.yml'
+    inputs:
+      tag:
+        description: "Tag release, contoh v1.0.0"
+        required: true
+        default: "v1.0.0"
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  build-release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Extract project ZIP
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Extract project
         shell: bash
         run: |
           set -euo pipefail
-          ZIP_FILE="$(find . -maxdepth 1 -type f -iname 'TeinBooster.zip' -print -quit)"
-          if [ -z "$ZIP_FILE" ]; then
-            echo 'ERROR: TeinBooster.zip tidak ditemukan di root repository.'
-            echo 'Upload file ZIP dengan nama TeinBooster.zip ke root repository.'
-            exit 1
-          fi
-          mkdir -p extracted
-          unzip -q "$ZIP_FILE" -d extracted
-          PROJECT_DIR="$(find extracted -type f -name settings.gradle -printf '%h\n' | head -n 1)"
-          if [ -z "$PROJECT_DIR" ]; then
-            echo 'ERROR: settings.gradle tidak ditemukan di dalam ZIP.'
-            exit 1
-          fi
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project directory: $PROJECT_DIR"
 
-      - name: Build debug and release APKs
+          test -f TeinBooster.zip || {
+            echo "::error::TeinBooster.zip tidak ditemukan di root repository"
+            exit 1
+          }
+
+          mkdir -p "$RUNNER_TEMP/source"
+          unzip -q TeinBooster.zip -d "$RUNNER_TEMP/source"
+
+          WRAPPER="$(find "$RUNNER_TEMP/source" \
+            -type f -name gradlew -print -quit)"
+
+          test -n "$WRAPPER" || {
+            echo "::error::File gradlew tidak ditemukan"
+            exit 1
+          }
+
+          DIR="$(dirname "$WRAPPER")"
+
+          test -f "$DIR/settings.gradle" || {
+            echo "::error::settings.gradle tidak ditemukan"
+            exit 1
+          }
+
+          test -f "$DIR/gradle/wrapper/gradle-wrapper.jar" || {
+            echo "::error::Gradle wrapper JAR tidak ditemukan"
+            exit 1
+          }
+
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          chmod +x "$WRAPPER"
+
+      - name: Build installable release APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug assembleRelease
 
-      - name: Upload APK files
-        uses: actions/upload-artifact@v4
+          ./gradlew --no-daemon --stacktrace assembleRelease
+
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          test -s "$APK" || {
+            echo "::error::APK release gagal dibuat"
+            find app/build/outputs/apk -type f -name '*.apk' || true
+            exit 1
+          }
+
+          mkdir -p "$RUNNER_TEMP/final-apk"
+          cp "$APK" "$RUNNER_TEMP/final-apk/TeinBooster.apk"
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
+            -type f -name apksigner -print | sort -V | tail -n 1)"
+
+          test -n "$APKSIGNER" || {
+            echo "::error::apksigner tidak ditemukan"
+            exit 1
+          }
+
+          "$APKSIGNER" verify --verbose \
+            "$RUNNER_TEMP/final-apk/TeinBooster.apk"
+
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: TeinBooster-APKs
-          path: |
-            extracted/**/app/build/outputs/apk/debug/*.apk
-            extracted/**/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          tag_name: ${{ inputs.tag }}
+          name: TeinBooster ${{ inputs.tag }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            TeinBooster Android APK.
+            Unduh TeinBooster.apk untuk instalasi.
+          files: ${{ runner.temp }}/final-apk/TeinBooster.apk
+          fail_on_unmatched_files: true
+          make_latest: true
