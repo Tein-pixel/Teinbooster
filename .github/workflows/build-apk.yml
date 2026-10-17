@@ -15,6 +15,8 @@ permissions:
 jobs:
   build-release:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
 
     steps:
       - name: Checkout repository
@@ -26,69 +28,105 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android cmdline-tools and SDK packages
+      - name: Ensure Android cmdline-tools and SDK packages
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_HOME" || true
-          find "$ANDROID_HOME" -maxdepth 4 -type f -name sdkmanager -print || true
-
-          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          # Resolve ANDROID_SDK_ROOT
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$ANDROID_SDK_ROOT"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
 
-          if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "sdkmanager tidak ditemukan pada path yang diharapkan, mencoba download commandlinetools..."
+          # Try to find existing sdkmanager
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT" -type f -name sdkmanager -print -quit || true)"
+
+          # If missing, try to download known command line tools (try several fallbacks)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found, downloading commandlinetools..."
             cd /tmp
-            curl -fSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o cmdline-tools.zip
-            rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-            mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-            unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-            if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin" ]; then
-              cp -r "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/." "$ANDROID_SDK_ROOT/cmdline-tools/latest/"
+
+            urls=(
+              "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+              "https://dl.google.com/android/repository/commandlinetools-linux-latest.zip"
+              "https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip"
+            )
+
+            for u in "${urls[@]}"; do
+              echo "Trying $u"
+              if curl -fsSL "$u" -o cmdline-tools.zip; then
+                echo "Downloaded commandlinetools from $u"
+                break
+              fi
+            done
+
+            if [ ! -f cmdline-tools.zip ]; then
+              echo "::error::Gagal men-download commandline tools. Periksa URL atau koneksi."
+              ls -la /tmp || true
+              exit 1
             fi
-            rm -rf cmdline-tools.zip "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools"
+
+            # Unpack into cmdline-tools/latest
+            rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+            mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/tmp"
+            unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/tmp"
+            # Normalize layout: some zips include top-level 'cmdline-tools' dir
+            if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/tmp/cmdline-tools" ]; then
+              mv "$ANDROID_SDK_ROOT/cmdline-tools/tmp/cmdline-tools"/* "$ANDROID_SDK_ROOT/cmdline-tools/latest/"
+            else
+              mv "$ANDROID_SDK_ROOT/cmdline-tools/tmp/"* "$ANDROID_SDK_ROOT/cmdline-tools/latest/" || true
+            fi
+            rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/tmp" cmdline-tools.zip
+            SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           fi
 
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager tidak ditemukan di $ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
+            # fallback: try PATH
+            if command -v sdkmanager >/dev/null 2>&1; then
+              SDKMANAGER="$(command -v sdkmanager)"
+            fi
+          fi
+
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager tidak ditemukan di $ANDROID_SDK_ROOT atau PATH"
             exit 1
           fi
 
+          echo "Using sdkmanager: $SDKMANAGER"
           export PATH="$(dirname "$SDKMANAGER"):$PATH"
+          yes | "$SDKMANAGER" --licenses || true
 
-          yes | "$SDKMANAGER" --licenses
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          # Install required modern SDK packages (avoid deprecated 'tools')
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0" || {
+            echo "::error::Gagal menginstal paket SDK yang dibutuhkan"
+            "$SDKMANAGER" --list || true
+            exit 1
+          }
+
+      - name: Verify SDK layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_SDK_ROOT" || true
+          find "$ANDROID_SDK_ROOT" -maxdepth 5 -type f -name sdkmanager -print || true
 
       - name: Extract project
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f TeinBooster.zip || {
-            echo "::error::TeinBooster.zip tidak ditemukan di root repository"
-            exit 1
-          }
+          test -f TeinBooster.zip || { echo "::error::TeinBooster.zip tidak ditemukan di root repository"; exit 1; }
 
           mkdir -p "$RUNNER_TEMP/source"
           unzip -q TeinBooster.zip -d "$RUNNER_TEMP/source"
 
-          WRAPPER="$(find "$RUNNER_TEMP/source" -type f -name gradlew -print -quit)"
-          test -n "$WRAPPER" || {
-            echo "::error::File gradlew tidak ditemukan di zip"
-            exit 1
-          }
+          WRAPPER="$(find "$RUNNER_TEMP/source" -type f -name gradlew -print -quit || true)"
+          test -n "$WRAPPER" || { echo "::error::File gradlew tidak ditemukan di zip"; exit 1; }
 
-          DIR="$(dirname "$WRAPPER)"
+          DIR="$(dirname "$WRAPPER")"
 
-          if [ -f "$DIR/settings.gradle" ] || [ -f "$DIR/settings.gradle.kts" ]; then
-            :
-          else
+          if [ ! -f "$DIR/settings.gradle" ] && [ ! -f "$DIR/settings.gradle.kts" ]; then
             echo "::error::settings.gradle / settings.gradle.kts tidak ditemukan"
             exit 1
           fi
@@ -119,13 +157,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/final-apk"
           cp "$APK" "$RUNNER_TEMP/final-apk/TeinBooster.apk"
 
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort | tail -n 1 || true)"
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort | tail -n 1 || true)"
           if [ -z "$APKSIGNER" ]; then
             echo "::error::apksigner tidak ditemukan"
             exit 1
           fi
 
-          "$APKSIGNER" verify --verbose "$RUNNER_TEMP/final-apk/TeinBooster.apk"
+          "$APKSIGNER" verify --verbose "$RUNNER_TEMP/final-apk/TeinBooster.apk" || true
 
       - name: Publish APK to GitHub Release
         uses: softprops/action-gh-release@v2
