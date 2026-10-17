@@ -1,4 +1,3 @@
-
 name: TeinBooster - Build and Release APK
 
 on:
@@ -30,6 +29,27 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_HOME" || true
+          find "$ANDROID_HOME" -maxdepth 3 -type f -name sdkmanager -print || true
+
+          SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager tidak ditemukan di $ANDROID_HOME"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
       - name: Extract project
         shell: bash
         run: |
@@ -43,25 +63,26 @@ jobs:
           mkdir -p "$RUNNER_TEMP/source"
           unzip -q TeinBooster.zip -d "$RUNNER_TEMP/source"
 
-          WRAPPER="$(find "$RUNNER_TEMP/source" \
-            -type f -name gradlew -print -quit)"
-
+          WRAPPER="$(find "$RUNNER_TEMP/source" -type f -name gradlew -print -quit)"
           test -n "$WRAPPER" || {
-            echo "::error::File gradlew tidak ditemukan"
+            echo "::error::File gradlew tidak ditemukan di zip"
             exit 1
           }
 
           DIR="$(dirname "$WRAPPER")"
 
-          test -f "$DIR/settings.gradle" || {
-            echo "::error::settings.gradle tidak ditemukan"
+          # support gradle or gradle.kts
+          if [ -f "$DIR/settings.gradle" ] || [ -f "$DIR/settings.gradle.kts" ]; then
+            :
+          else
+            echo "::error::settings.gradle / settings.gradle.kts tidak ditemukan"
             exit 1
-          }
+          fi
 
-          test -f "$DIR/gradle/wrapper/gradle-wrapper.jar" || {
+          if [ ! -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "::error::Gradle wrapper JAR tidak ditemukan"
             exit 1
-          }
+          fi
 
           echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
           chmod +x "$WRAPPER"
@@ -74,27 +95,23 @@ jobs:
 
           ./gradlew --no-daemon --stacktrace assembleRelease
 
-          APK="app/build/outputs/apk/release/app-release.apk"
-
-          test -s "$APK" || {
-            echo "::error::APK release gagal dibuat"
+          APK="$(find app/build/outputs/apk -type f -name '*.apk' | grep -E 'release' | head -n 1 || true)"
+          if [ -z "$APK" ]; then
+            echo "::error::APK release tidak ditemukan"
             find app/build/outputs/apk -type f -name '*.apk' || true
             exit 1
-          }
+          fi
 
           mkdir -p "$RUNNER_TEMP/final-apk"
           cp "$APK" "$RUNNER_TEMP/final-apk/TeinBooster.apk"
 
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
-            -type f -name apksigner -print | sort -V | tail -n 1)"
-
-          test -n "$APKSIGNER" || {
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort | tail -n 1 || true)"
+          if [ -z "$APKSIGNER" ]; then
             echo "::error::apksigner tidak ditemukan"
             exit 1
-          }
+          fi
 
-          "$APKSIGNER" verify --verbose \
-            "$RUNNER_TEMP/final-apk/TeinBooster.apk"
+          "$APKSIGNER" verify --verbose "$RUNNER_TEMP/final-apk/TeinBooster.apk"
 
       - name: Publish APK to GitHub Release
         uses: softprops/action-gh-release@v2
