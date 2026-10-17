@@ -29,26 +29,41 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install required Android SDK packages
+      - name: Install Android cmdline-tools and SDK packages
         shell: bash
         run: |
           set -euo pipefail
 
           echo "ANDROID_HOME=$ANDROID_HOME"
           ls -la "$ANDROID_HOME" || true
-          find "$ANDROID_HOME" -maxdepth 3 -type f -name sdkmanager -print || true
+          find "$ANDROID_HOME" -maxdepth 4 -type f -name sdkmanager -print || true
 
-          SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit || true)"
-          if [ -z "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager tidak ditemukan di $ANDROID_HOME"
+          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "sdkmanager tidak ditemukan pada path yang diharapkan, mencoba download commandlinetools..."
+            cd /tmp
+            curl -fSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o cmdline-tools.zip
+            rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+            mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+            unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+            if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin" ]; then
+              cp -r "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/." "$ANDROID_SDK_ROOT/cmdline-tools/latest/"
+            fi
+            rm -rf cmdline-tools.zip "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools"
+          fi
+
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager tidak ditemukan di $ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
             exit 1
           fi
 
+          export PATH="$(dirname "$SDKMANAGER"):$PATH"
+
           yes | "$SDKMANAGER" --licenses
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Extract project
         shell: bash
@@ -69,9 +84,8 @@ jobs:
             exit 1
           }
 
-          DIR="$(dirname "$WRAPPER")"
+          DIR="$(dirname "$WRAPPER)"
 
-          # support gradle or gradle.kts
           if [ -f "$DIR/settings.gradle" ] || [ -f "$DIR/settings.gradle.kts" ]; then
             :
           else
